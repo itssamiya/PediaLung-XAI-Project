@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+venv310/
+.venv/
+
+# Datasets / raw data
+data/
+*.wav
+*.zip
+*.tar
+*.gz
+
+# Generated features
+features/
+*.npy
+*.npz
+
+# Trained models
+saved_models/
+*.pth
+*.pt
+*.onnx
+*.ckpt
+*.h5
+
+# Generated results
+results/
+*.png
+*.jpg
+*.jpeg
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+*.tmp
+
+# Old experimental implementations
+proposed_model/old_models/
+
+# Generated deployment reports
+proposed_model/deployment/*.txt
