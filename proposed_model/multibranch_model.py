@@ -2,17 +2,16 @@ import torch
 import torch.nn as nn
 
 from config import MODEL_CONFIG
-from config import EXPERIMENT_NAME
-
 
 from modules.feature_fusion import WeightedAdaptiveFeatureFusion
 from modules.attention import FrequencyAwareAttention
 
+from modules.residual_block import ResidualBlock
+from modules.se_block import SEBlock
+
 # ==========================================================
 # CNN Encoder
 # ==========================================================
-from modules.residual_block import ResidualBlock
-from modules.se_block import SEBlock
 
 
 class CNNEncoder(nn.Module):
@@ -23,13 +22,13 @@ class CNNEncoder(nn.Module):
 
         layers = []
 
-        # ------------------------
+        # --------------------------------------------------
         # Block 1
-        # ------------------------
+        # --------------------------------------------------
 
         layers.extend(
             [
-                nn.Conv2d(1, 32, 3, padding=1),
+                nn.Conv2d(1, 32, kernel_size=3, padding=1),
                 nn.BatchNorm2d(32),
                 nn.ReLU(),
             ]
@@ -40,13 +39,13 @@ class CNNEncoder(nn.Module):
 
         layers.append(nn.MaxPool2d(2))
 
-        # ------------------------
+        # --------------------------------------------------
         # Block 2
-        # ------------------------
+        # --------------------------------------------------
 
         layers.extend(
             [
-                nn.Conv2d(32, 64, 3, padding=1),
+                nn.Conv2d(32, 64, kernel_size=3, padding=1),
                 nn.BatchNorm2d(64),
                 nn.ReLU(),
             ]
@@ -57,13 +56,13 @@ class CNNEncoder(nn.Module):
 
         layers.append(nn.MaxPool2d(2))
 
-        # ------------------------
+        # --------------------------------------------------
         # Block 3
-        # ------------------------
+        # --------------------------------------------------
 
         layers.extend(
             [
-                nn.Conv2d(64, 128, 3, padding=1),
+                nn.Conv2d(64, 128, kernel_size=3, padding=1),
                 nn.BatchNorm2d(128),
                 nn.ReLU(),
             ]
@@ -72,6 +71,7 @@ class CNNEncoder(nn.Module):
         if use_se:
             layers.append(SEBlock(128))
 
+        # Final convolutional layer
         layers.extend(
             [
                 nn.Conv2d(128, 128, kernel_size=3, padding=1),
@@ -80,9 +80,14 @@ class CNNEncoder(nn.Module):
             ]
         )
 
+        # Global average pooling
         layers.append(nn.AdaptiveAvgPool2d((1, 1)))
 
         self.features = nn.Sequential(*layers)
+
+    # ------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------
 
     def forward(self, x):
 
@@ -92,17 +97,20 @@ class CNNEncoder(nn.Module):
 
             x = layer(x)
 
-            if not isinstance(layer, nn.AdaptiveAvgPool2d):
+            # Capture the final convolutional feature map
+            # after the convolution and before global pooling.
+            if isinstance(layer, nn.Conv2d) and layer.out_channels == 128:
                 feature_map = x
 
         pooled = x
+
         feature_vector = pooled.flatten(1)
 
         return feature_vector, feature_map
 
 
 # ==========================================================
-# Proposed Model
+# Proposed PediaLung-XAI Model
 # ==========================================================
 
 
@@ -119,51 +127,108 @@ class PediaLungXAI(nn.Module):
 
         super().__init__()
 
-        # Three feature extractors
+        # --------------------------------------------------
+        # Three feature encoders
+        # --------------------------------------------------
 
         self.mfcc_encoder = CNNEncoder(
-            use_residual,
-            use_se,
+            use_residual=use_residual,
+            use_se=use_se,
         )
 
         self.mel_encoder = CNNEncoder(
-            use_residual,
-            use_se,
+            use_residual=use_residual,
+            use_se=use_se,
         )
 
         self.chroma_encoder = CNNEncoder(
-            use_residual,
-            use_se,
+            use_residual=use_residual,
+            use_se=use_se,
         )
 
-        # Novel Modules
-
-        if use_fusion:
-            self.fusion = WeightedAdaptiveFeatureFusion()
-
-        if use_attention:
-            self.attention = FrequencyAwareAttention()
+        # --------------------------------------------------
+        # Adaptive Feature Fusion
+        # --------------------------------------------------
 
         self.use_fusion = use_fusion
+
+        if use_fusion:
+
+            self.fusion = WeightedAdaptiveFeatureFusion()
+
+        # --------------------------------------------------
+        # Frequency-Aware Attention
+        # --------------------------------------------------
+
         self.use_attention = use_attention
 
-        # Lightweight classifier
+        if use_attention:
+
+            self.attention = FrequencyAwareAttention(feature_dim=128)
+
+        # --------------------------------------------------
+        # Lightweight Classifier
+        # --------------------------------------------------
 
         self.classifier = nn.Sequential(
-            nn.Linear(128, 64), nn.ReLU(), nn.Dropout(0.2), nn.Linear(64, num_classes)
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, num_classes),
         )
 
-    def forward(self, mfcc, mel, chroma):
+    # ======================================================
+    # Forward
+    # ======================================================
 
-        mfcc_feature, _ = self.mfcc_encoder(mfcc)
+    def forward(
+        self,
+        mfcc,
+        mel,
+        chroma,
+    ):
+
+        # --------------------------------------------------
+        # Feature extraction
+        # --------------------------------------------------
+
+        mfcc_feature, mfcc_feature_map = self.mfcc_encoder(mfcc)
 
         mel_feature, mel_feature_map = self.mel_encoder(mel)
 
-        chroma_feature, _ = self.chroma_encoder(chroma)
+        chroma_feature, chroma_feature_map = self.chroma_encoder(chroma)
+
+        print("\n========== FEATURE VECTOR STATISTICS ==========")
+
+        print(
+            f"MFCC    mean={mfcc_feature.mean().item():.6f} "
+            f"std={mfcc_feature.std().item():.6f} "
+            f"min={mfcc_feature.min().item():.6f} "
+            f"max={mfcc_feature.max().item():.6f}"
+        )
+
+        print(
+            f"Mel     mean={mel_feature.mean().item():.6f} "
+            f"std={mel_feature.std().item():.6f} "
+            f"min={mel_feature.min().item():.6f} "
+            f"max={mel_feature.max().item():.6f}"
+        )
+
+        print(
+            f"Chroma  mean={chroma_feature.mean().item():.6f} "
+            f"std={chroma_feature.std().item():.6f} "
+            f"min={chroma_feature.min().item():.6f} "
+            f"max={chroma_feature.max().item():.6f}"
+        )
+
+        print("===============================================\n")
+        # --------------------------------------------------
+        # Feature fusion
+        # --------------------------------------------------
 
         if self.use_fusion:
 
-            fused_feature, weights = self.fusion(
+            fused_feature, fusion_weights = self.fusion(
                 mfcc_feature,
                 mel_feature,
                 chroma_feature,
@@ -171,9 +236,13 @@ class PediaLungXAI(nn.Module):
 
         else:
 
-            fused_feature = (mfcc_feature + mel_feature + chroma_feature) / 3
+            fused_feature = (mfcc_feature + mel_feature + chroma_feature) / 3.0
 
-            weights = None
+            fusion_weights = None
+
+        # --------------------------------------------------
+        # Frequency-aware attention
+        # --------------------------------------------------
 
         if self.use_attention:
 
@@ -185,9 +254,31 @@ class PediaLungXAI(nn.Module):
 
             attention_map = None
 
+        # --------------------------------------------------
+        # Classification
+        # --------------------------------------------------
+
         output = self.classifier(attention_feature)
 
-        return output, weights, attention_map, mel_feature_map
+        # --------------------------------------------------
+        # Return
+        #
+        # output
+        # fusion_weights
+        # attention_map
+        # mel_feature_map
+        #
+        # We keep mel_feature_map as the fourth output
+        # because your current Grad-CAM/inference code
+        # expects this interface.
+        # --------------------------------------------------
+
+        return (
+            output,
+            fusion_weights,
+            attention_map,
+            mfcc_feature_map,
+        )
 
 
 # ==========================================================
@@ -196,7 +287,16 @@ class PediaLungXAI(nn.Module):
 
 if __name__ == "__main__":
 
-    model = PediaLungXAI(**MODEL_CONFIG[EXPERIMENT_NAME])
+    print("=" * 60)
+    print("Testing PediaLungXAI")
+    print("=" * 60)
+
+    # Use the actual proposed architecture.
+    model = PediaLungXAI(**MODEL_CONFIG["proposed"])
+
+    # ------------------------------------------------------
+    # Dummy inputs
+    # ------------------------------------------------------
 
     mfcc = torch.randn(4, 1, 40, 94)
 
@@ -204,19 +304,48 @@ if __name__ == "__main__":
 
     chroma = torch.randn(4, 1, 12, 259)
 
+    # ------------------------------------------------------
+    # Forward pass
+    # ------------------------------------------------------
+
     outputs, weights, attention, feature_map = model(
         mfcc,
         mel,
         chroma,
     )
 
+    # ------------------------------------------------------
+    # Model information
+    # ------------------------------------------------------
+
+    print("\nModel:")
     print(model)
 
-    print("\nPrediction :", outputs.shape)
+    print("\nOutput shape:")
+    print(outputs.shape)
 
-    print("Fusion Weights :", weights)
+    print("\nFusion weights:")
+    print(weights)
+
+    print("\nAttention shape:")
 
     if attention is not None:
-        print("Attention :", attention.shape)
+        print(attention.shape)
     else:
-        print("Attention : Disabled")
+        print("Disabled")
+
+    print("\nReturned MFCC feature map:")
+    print(feature_map.shape)
+
+    print("\nFeature map statistics:")
+    print("Min :", feature_map.min().item())
+
+    print("Max :", feature_map.max().item())
+
+    print("Mean:", feature_map.mean().item())
+
+    print("Std :", feature_map.std().item())
+
+    print("\n" + "=" * 60)
+    print("MODEL TEST COMPLETE")
+    print("=" * 60)

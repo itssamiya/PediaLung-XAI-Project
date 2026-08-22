@@ -1,247 +1,184 @@
-import os
-import cv2
 import torch
-import pandas as pd
-import matplotlib.pyplot as plt
-
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
 from multibranch_model import PediaLungXAI
-from multifeature_dataset import MultiFeatureDataset
-from gradcam import GradCAM, visualize_gradcam
+from gradcam import GradCAM
 
 from config import MODEL_CONFIG
-from config import EXPERIMENT_NAME
-from config import MODEL_DIR
-from config import SAVE_DIR
 
-# ==========================================================
-# Configuration
-# ==========================================================
+print("=" * 60)
+print("GRAD-CAM DIAGNOSTIC TEST")
+print("=" * 60)
+
+
+# ----------------------------------------------------------
+# 1. Load model
+# ----------------------------------------------------------
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-print("=" * 60)
-print("Testing Grad-CAM")
-print("=" * 60)
+print("\nDevice:", device)
 
-print("Device:", device)
-print("Experiment:", EXPERIMENT_NAME)
-
-
-# ==========================================================
-# Load model
-# ==========================================================
-
-print("\nLoading model...")
-
-model = PediaLungXAI(
-    num_classes=7,
-    **MODEL_CONFIG["proposed"],
-).to(device)
-
-checkpoint_path = os.path.join(
-    MODEL_DIR,
-    f"{EXPERIMENT_NAME}_best.pth",
-)
-
-model.load_state_dict(
-    torch.load(
-        checkpoint_path,
-        map_location=device,
-    )
-)
+model = PediaLungXAI(**MODEL_CONFIG["proposed"]).to(device)
 
 model.eval()
 
-print("Model loaded successfully.")
+
+# ----------------------------------------------------------
+# 2. Create test inputs
+# ----------------------------------------------------------
+# These dimensions match your current model test.
+
+mfcc = torch.randn(1, 1, 40, 94, device=device)
+
+mel = torch.randn(1, 1, 128, 259, device=device)
+
+chroma = torch.randn(1, 1, 12, 259, device=device)
 
 
-# ==========================================================
-# Label Encoder
-# ==========================================================
-
-df = pd.read_csv("features/labels.csv")
-
-label_encoder = LabelEncoder()
-
-df["label_encoded"] = label_encoder.fit_transform(df["label"])
-
-print("\nClasses:")
-
-for i, name in enumerate(label_encoder.classes_):
-    print(i, "->", name)
-
-
-# ==========================================================
-# Create same test split
-# ==========================================================
-
-_, test_df = train_test_split(
-    df,
-    test_size=0.20,
-    random_state=42,
-    stratify=df["label_encoded"],
-)
-
-print("\nTest samples:", len(test_df))
-
-
-# ==========================================================
-# Dataset
-# ==========================================================
-
-dataset = MultiFeatureDataset(
-    dataframe=test_df,
-    feature_root="features",
-)
-
-loader = DataLoader(
-    dataset,
-    batch_size=1,
-    shuffle=False,
-)
-
-
-# ==========================================================
-# Select one sample
-# ==========================================================
-
-mfcc, mel, chroma, label = next(iter(loader))
-
-mfcc = mfcc.to(device)
-mel = mel.to(device)
-chroma = chroma.to(device)
-label = label.to(device)
-
-
-true_class = label.item()
-
-print("\nTrue Label:")
-print(label_encoder.classes_[true_class])
-
-
-# ==========================================================
-# Model Prediction
-# ==========================================================
-
-with torch.no_grad():
-
-    output, fusion_weights, attention_map, feature_map = model(
-        mfcc,
-        mel,
-        chroma,
-    )
-
-probabilities = torch.softmax(output, dim=1)
-
-predicted_class = torch.argmax(
-    probabilities,
-    dim=1,
-).item()
-
-confidence = probabilities[0, predicted_class].item()
-
-print("\nPrediction:")
-print(label_encoder.classes_[predicted_class])
-
-print(f"Confidence: {confidence * 100:.2f}%")
-
-
-# ==========================================================
-# Top-3 Predictions
-# ==========================================================
-
-top3 = torch.topk(
-    probabilities,
-    k=3,
-    dim=1,
-)
-
-top_predictions = []
-
-for prob, cls in zip(
-    top3.values[0],
-    top3.indices[0],
-):
-
-    top_predictions.append(
-        (
-            label_encoder.classes_[cls.item()],
-            prob.item(),
-        )
-    )
-
-
-print("\nTop-3 Predictions:")
-
-for name, prob in top_predictions:
-    print(f"{name:20s} {prob * 100:.2f}%")
-
-
-# ==========================================================
-# Initialize Grad-CAM
-# ==========================================================
+# ----------------------------------------------------------
+# 3. Initialize Grad-CAM
+# ----------------------------------------------------------
 
 print("\nInitializing Grad-CAM...")
 
 gradcam = GradCAM(model)
 
-print("Grad-CAM initialized.")
+print("Grad-CAM ready.")
 
 
-# ==========================================================
-# Generate Heatmap
-# ==========================================================
+# ----------------------------------------------------------
+# 4. Forward pass
+# ----------------------------------------------------------
 
-print("\nGenerating heatmap...")
+model.zero_grad()
 
-heatmap = gradcam.generate(
+outputs, weights, attention, mel_feature_map = model(
     mfcc,
     mel,
     chroma,
-    predicted_class,
 )
 
-heatmap = cv2.GaussianBlur(
-    heatmap,
-    (11, 11),
-    0,
-)
+predicted_class = outputs.argmax(dim=1).item()
 
-print("Heatmap generated.")
+target_score = outputs[0, predicted_class]
 
+print("\nPredicted class:", predicted_class)
 
-# ==========================================================
-# Save Grad-CAM Figure
-# ==========================================================
-
-os.makedirs(
-    SAVE_DIR,
-    exist_ok=True,
-)
-
-save_path = os.path.join(
-    SAVE_DIR,
-    "test_gradcam.png",
-)
+print("Target score:", target_score.item())
 
 
-visualize_gradcam(
-    mel,
-    heatmap,
-    save_path,
-    label_encoder.classes_[true_class],
-    label_encoder.classes_[predicted_class],
-    confidence,
-    top_predictions,
-)
+# ----------------------------------------------------------
+# 5. Inspect returned Mel feature map
+# ----------------------------------------------------------
+
+print("\n================ MEL FEATURE MAP ================")
+
+print("Shape:", tuple(mel_feature_map.shape))
+
+print("Min:", mel_feature_map.min().item())
+
+print("Max:", mel_feature_map.max().item())
+
+print("Mean:", mel_feature_map.mean().item())
+
+print("Std:", mel_feature_map.std().item())
+
+
+# ----------------------------------------------------------
+# 6. Retain gradient
+# ----------------------------------------------------------
+
+mel_feature_map.retain_grad()
+
+
+# ----------------------------------------------------------
+# 7. Backward pass
+# ----------------------------------------------------------
+
+target_score.backward()
+
+
+# ----------------------------------------------------------
+# 8. Check gradient
+# ----------------------------------------------------------
+
+print("\n================ GRADIENT ================")
+
+if mel_feature_map.grad is None:
+
+    print("ERROR: mel_feature_map.grad is None")
+
+else:
+
+    gradients = mel_feature_map.grad
+
+    print("Shape:", tuple(gradients.shape))
+
+    print("Min:", gradients.min().item())
+
+    print("Max:", gradients.max().item())
+
+    print("Mean:", gradients.mean().item())
+
+    print("Absolute mean:", gradients.abs().mean().item())
+
+    print("Std:", gradients.std().item())
+
+
+# ----------------------------------------------------------
+# 9. Calculate Grad-CAM manually
+# ----------------------------------------------------------
+
+if mel_feature_map.grad is not None:
+
+    gradients = mel_feature_map.grad[0]
+    activations = mel_feature_map.detach()[0]
+
+    # Global average pooling of gradients
+
+    weights_cam = gradients.mean(dim=(1, 2))
+
+    print("\n================ CAM WEIGHTS ================")
+
+    print("Shape:", tuple(weights_cam.shape))
+
+    print("Min:", weights_cam.min().item())
+
+    print("Max:", weights_cam.max().item())
+
+    print("Mean:", weights_cam.mean().item())
+
+    # Weighted feature maps
+
+    cam = torch.sum(
+        weights_cam[:, None, None] * activations,
+        dim=0,
+    )
+
+    print("\n================ RAW CAM ================")
+
+    print("Shape:", tuple(cam.shape))
+
+    print("Min:", cam.min().item())
+
+    print("Max:", cam.max().item())
+
+    print("Mean:", cam.mean().item())
+
+    # ReLU
+
+    cam = F.relu(cam)
+
+    print("\n================ AFTER RELU ================")
+
+    print("Min:", cam.min().item())
+
+    print("Max:", cam.max().item())
+
+    print("Mean:", cam.mean().item())
 
 
 print("\n" + "=" * 60)
-print("Grad-CAM test completed.")
-print("Saved image:")
-print(save_path)
+print("DIAGNOSTIC COMPLETE")
 print("=" * 60)

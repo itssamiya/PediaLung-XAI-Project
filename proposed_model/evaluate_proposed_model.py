@@ -35,7 +35,9 @@ from config import (
     EXPERIMENT_NAME,
 )
 
-RESULT_EXPERIMENT = "proposed_focal_g2"
+# RESULT_EXPERIMENT = "proposed_focal_g2"
+RESULT_EXPERIMENT = "proposed_focal_sampler"
+CHECKPOINT_NAME = "proposed_focal_g2_best.pth"
 SAVE_DIR = os.path.join(cfg.RESULTS_ROOT, RESULT_EXPERIMENT)
 
 os.makedirs(SAVE_DIR, exist_ok=True)

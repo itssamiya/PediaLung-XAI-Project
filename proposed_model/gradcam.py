@@ -1,231 +1,457 @@
 import os
-import cv2
 import numpy as np
-import matplotlib.pyplot as plt
-
 import torch
 import torch.nn.functional as F
-
-from multibranch_model import PediaLungXAI
-from gradcam_plus_plus import GradCAMPlusPlus
-import pandas as pd
-
-from sklearn.model_selection import train_test_split
-
-from sklearn.preprocessing import LabelEncoder
-
-from multifeature_dataset import MultiFeatureDataset
-
-from torch.utils.data import DataLoader
-
-from config import MODEL_CONFIG
-from config import EXPERIMENT_NAME
-from config import SAVE_DIR
-from config import MODEL_DIR
-
-print("=" * 60)
-print("Running file:", os.path.abspath(__file__))
-print("=" * 60)
-
-USE_GRADCAM_PLUS_PLUS = True
+import matplotlib.pyplot as plt
 
 
-class GradCAM:
+class GradCAMPlusPlus:
 
     def __init__(self, model):
 
         self.model = model
         self.model.eval()
 
+        # ==================================================
+        # Target layer
+        # ==================================================
+        #
+        # CNNEncoder:
+        #
+        # 14 = Conv2d(128,128)
+        # 15 = BatchNorm2d(128)
+        # 16 = ReLU
+        # 17 = AdaptiveAvgPool2d
+        #
+        # Third convolutional feature map of MEL branch
+        # Targeting this layer preserves meaningful spatial
+        # frequency-time information for Grad-CAM++.
+        # the convolution output before BatchNorm is not
+        # a suitable visualization target here.
+        #
+        self.target_layer = self.model.mel_encoder.features[12]
+
         self.activations = None
         self.gradients = None
 
-        target_layer = self.model.mel_encoder.features[14]
-        print(target_layer)
+        # ==================================================
+        # Hooks
+        # ==================================================
 
-        target_layer.register_forward_hook(self.save_activation)
-        target_layer.register_full_backward_hook(self.save_gradient)
+        self.target_layer.register_forward_hook(self._save_activation)
 
-    def save_activation(self, module, input, output):
+        self.target_layer.register_full_backward_hook(self._save_gradient)
+
+        print("Grad-CAM++ target layer:")
+        print(self.target_layer)
+
+    # ======================================================
+    # Forward hook
+    # ======================================================
+
+    def _save_activation(
+        self,
+        module,
+        input,
+        output,
+    ):
 
         self.activations = output
 
-    def save_gradient(self, module, grad_input, grad_output):
+    # ======================================================
+    # Backward hook
+    # ======================================================
+
+    def _save_gradient(
+        self,
+        module,
+        grad_input,
+        grad_output,
+    ):
 
         self.gradients = grad_output[0]
 
-    def generate(self, mfcc, mel, chroma, target_class=None):
+    # ======================================================
+    # Generate Grad-CAM++
+    # ======================================================
 
-        self.model.zero_grad()
+    def generate(
+        self,
+        mfcc,
+        mel,
+        chroma,
+        class_idx,
+    ):
 
-        output, _, _, _ = self.model(mfcc, mel, chroma)
+        self.model.eval()
 
-        if target_class is None:
+        # --------------------------------------------------
+        # Clear previous values
+        # --------------------------------------------------
 
-            target_class = output.argmax(dim=1).item()
+        self.activations = None
+        self.gradients = None
 
-        score = output[:, target_class]
+        self.model.zero_grad(set_to_none=True)
+
+        # --------------------------------------------------
+        # Forward pass
+        # --------------------------------------------------
+
+        outputs, _, _, _ = self.model(
+            mfcc,
+            mel,
+            chroma,
+        )
+
+        # --------------------------------------------------
+        # Target class score
+        # --------------------------------------------------
+
+        score = outputs[:, class_idx].sum()
+
+        # --------------------------------------------------
+        # Backward pass
+        # --------------------------------------------------
 
         score.backward()
 
-        gradients = self.gradients[0]
+        # --------------------------------------------------
+        # Validate hooks
+        # --------------------------------------------------
 
-        activations = self.activations[0]
+        if self.activations is None:
+            raise RuntimeError("Grad-CAM++ ERROR: activation was not captured.")
 
-        print("Gradient mean :", gradients.abs().mean().item())
-        print("Activation mean :", activations.abs().mean().item())
+        if self.gradients is None:
+            raise RuntimeError("Grad-CAM++ ERROR: gradient was not captured.")
 
-        weights = gradients.mean(dim=(1, 2))
+        activations = self.activations
+        gradients = self.gradients
 
-        cam = torch.zeros(activations.shape[1:], device=activations.device)
+        # ==================================================
+        # Diagnostics
+        # ==================================================
 
-        for i, w in enumerate(weights):
+        print()
+        print("=============== GRAD-CAM++ ===============")
 
-            cam += w * activations[i]
-
-        cam = F.relu(cam)
-
-        print(cam.min().item(), cam.max().item())
-
-        cam = cam.detach().cpu().numpy()
-
-        cam = cv2.resize(
-            cam, (mel.shape[-1], mel.shape[-2]), interpolation=cv2.INTER_CUBIC
+        print(
+            "Target layer:",
+            self.target_layer,
         )
 
-        cam = cv2.GaussianBlur(cam, (9, 9), 0)
+        print(
+            "Activation shape:",
+            tuple(activations.shape),
+        )
 
-        cam = np.maximum(cam, 0)
+        print(
+            "Activation min:",
+            activations.min().item(),
+        )
 
-        cam = cam / (cam.max() + 1e-8)
+        print(
+            "Activation max:",
+            activations.max().item(),
+        )
 
-        cam = np.power(cam, 0.6)
+        print(
+            "Activation mean:",
+            activations.mean().item(),
+        )
 
-        return cam
+        print()
+
+        print(
+            "Gradient shape:",
+            tuple(gradients.shape),
+        )
+
+        print(
+            "Gradient min:",
+            gradients.min().item(),
+        )
+
+        print(
+            "Gradient max:",
+            gradients.max().item(),
+        )
+
+        print(
+            "Gradient mean:",
+            gradients.mean().item(),
+        )
+
+        # ==================================================
+        # Grad-CAM++ calculation
+        # ==================================================
+
+        gradients_2 = gradients.pow(2)
+
+        gradients_3 = gradients.pow(3)
+
+        # --------------------------------------------------
+        # Spatial contribution
+        # --------------------------------------------------
+
+        spatial_sum = (activations * gradients_3).sum(
+            dim=(2, 3),
+            keepdim=True,
+        )
+
+        # --------------------------------------------------
+        # Alpha denominator
+        # --------------------------------------------------
+
+        alpha_denom = 2.0 * gradients_2 + spatial_sum
+
+        alpha_denom = torch.where(
+            alpha_denom != 0.0,
+            alpha_denom,
+            torch.ones_like(alpha_denom),
+        )
+
+        alpha = gradients_2 / (alpha_denom + 1e-8)
+
+        # --------------------------------------------------
+        # Positive gradients
+        # --------------------------------------------------
+
+        positive_gradients = F.relu(gradients)
+
+        # --------------------------------------------------
+        # Grad-CAM++ channel weights
+        # --------------------------------------------------
+
+        weights = (alpha * positive_gradients).sum(
+            dim=(2, 3),
+            keepdim=True,
+        )
+
+        print()
+        print("CAM++ weights:")
+        print(
+            "Min:",
+            weights.min().item(),
+        )
+        print(
+            "Max:",
+            weights.max().item(),
+        )
+        print(
+            "Mean:",
+            weights.mean().item(),
+        )
+
+        # ==================================================
+        # Generate CAM++
+        # ==================================================
+
+        cam = (weights * activations).sum(dim=1)
+
+        # Only positive evidence
+        cam = F.relu(cam)
+
+        print()
+        print("Raw CAM++:")
+        print(
+            "Shape:",
+            tuple(cam.shape),
+        )
+
+        print(
+            "Min:",
+            cam.min().item(),
+        )
+
+        print(
+            "Max:",
+            cam.max().item(),
+        )
+
+        print(
+            "Mean:",
+            cam.mean().item(),
+        )
+
+        # --------------------------------------------------
+        # First sample
+        # --------------------------------------------------
+
+        cam = cam[0]
+
+        # ==================================================
+        # Normalize
+        # ==================================================
+
+        cam_min = cam.min()
+        cam_max = cam.max()
+
+        variation = (cam_max - cam_min).item()
+
+        if variation < 1e-10:
+
+            print()
+            print("WARNING: Grad-CAM++ has almost zero variation.")
+
+            cam = torch.zeros_like(cam)
+
+        else:
+
+            cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
+
+        print()
+        print("Final Grad-CAM++:")
+
+        print(
+            "Min:",
+            cam.min().item(),
+        )
+
+        print(
+            "Max:",
+            cam.max().item(),
+        )
+
+        print(
+            "Mean:",
+            cam.mean().item(),
+        )
+
+        print("==========================================")
+
+        return cam.detach().cpu().numpy()
+
+    # ======================================================
+    # End of class
+    # ======================================================
 
 
+# ==========================================================
 # Visualization
+# ==========================================================
 
 
 def visualize_gradcam(
-    mel_spec,
+    mel,
     heatmap,
     save_path,
-    true_label,
-    pred_label,
-    confidence=None,
-    top_predictions=None,
+    label,
+    prediction,
+    confidence,
+    top3,
 ):
 
-    mel_spec = mel_spec.squeeze().cpu().numpy()
+    # ------------------------------------------------------
+    # Convert MEL tensor to numpy
+    # ------------------------------------------------------
 
-    mel_spec = (mel_spec - mel_spec.min()) / (mel_spec.max() - mel_spec.min() + 1e-8)
+    if torch.is_tensor(mel):
 
-    fig = plt.figure(figsize=(14, 8))
+        mel_image = mel.detach().cpu().numpy()
 
-    #########################################################
-    # Original Mel Spectrogram
-    #########################################################
-
-    plt.subplot(2, 2, 1)
-
-    plt.imshow(
-        mel_spec,
-        cmap="gray",
-        origin="lower",
-        aspect="auto",
-    )
-
-    plt.title("Original Mel Spectrogram")
-
-    plt.xlabel("Time")
-
-    plt.ylabel("Mel Spectrogram")
-
-    #########################################################
-    # Heatmap
-    #########################################################
-
-    plt.subplot(2, 2, 2)
-
-    plt.imshow(
-        heatmap,
-        cmap="jet",
-        origin="lower",
-        aspect="auto",
-    )
-
-    if USE_GRADCAM_PLUS_PLUS:
-        plt.title("Grad-CAM++ Heatmap")
     else:
-        plt.title("Grad-CAM Heatmap")
 
-    plt.xlabel("Time")
+        mel_image = np.asarray(mel)
 
-    #########################################################
-    # Overlay
-    #########################################################
+    # Remove batch/channel dimensions
+    mel_image = np.squeeze(mel_image)
 
-    plt.subplot(2, 2, 3)
+    # ------------------------------------------------------
+    # Resize CAM to MEL dimensions
+    # ------------------------------------------------------
 
+    heatmap_tensor = (
+        torch.tensor(
+            heatmap,
+            dtype=torch.float32,
+        )
+        .unsqueeze(0)
+        .unsqueeze(0)
+    )
+
+    heatmap_tensor = F.interpolate(
+        heatmap_tensor,
+        size=mel_image.shape,
+        mode="bilinear",
+        align_corners=False,
+    )
+
+    heatmap_resized = heatmap_tensor[0, 0].numpy()
+
+    # ------------------------------------------------------
+    # Create output directory
+    # ------------------------------------------------------
+
+    directory = os.path.dirname(save_path)
+
+    if directory:
+        os.makedirs(
+            directory,
+            exist_ok=True,
+        )
+
+    # ------------------------------------------------------
+    # Create figure
+    # ------------------------------------------------------
+
+    plt.figure(figsize=(6, 3), dpi=100)
+
+    # MEL spectrogram
     plt.imshow(
-        mel_spec,
+        mel_image,
+        aspect="auto",
+        origin="lower",
         cmap="gray",
-        origin="lower",
-        aspect="auto",
     )
 
+    # Grad-CAM++ overlay
     plt.imshow(
-        heatmap,
-        cmap="jet",
-        alpha=0.55,
-        origin="lower",
+        heatmap_resized,
         aspect="auto",
+        origin="lower",
+        cmap="jet",
+        alpha=0.45,
     )
 
-    plt.title("Overlay")
+    plt.colorbar(label="Grad-CAM++ Importance")
+
+    plt.title(
+        f"Grad-CAM++ | Prediction: "
+        f"{prediction} | Confidence: "
+        f"{confidence * 100:.2f}%"
+    )
 
     plt.xlabel("Time")
-
-    #########################################################
-    # Prediction Panel
-    #########################################################
-
-    plt.subplot(2, 2, 4)
-
-    plt.axis("off")
-
-    txt = f"Prediction : {pred_label}\n"
-
-    if confidence is not None:
-
-        txt += f"Confidence : {confidence*100:.2f}%\n\n"
-
-    txt += f"Ground Truth : {true_label}\n\n"
-
-    if top_predictions is not None:
-
-        txt += "Top-3 Predictions\n\n"
-
-        for cls, prob in top_predictions:
-
-            txt += f"{cls:18s}{prob*100:.2f}%\n"
-
-    plt.text(
-        0,
-        1,
-        txt,
-        fontsize=12,
-        verticalalignment="top",
-        family="monospace",
-    )
+    plt.ylabel("Frequency")
 
     plt.tight_layout()
 
     plt.savefig(
         save_path,
-        dpi=300,
-        bbox_inches="tight",
+        dpi=100,
     )
 
     plt.close()
+
+    print(f"Grad-CAM++ image saved to: " f"{save_path}")
+
+    return save_path
+
+
+# ==========================================================
+# Direct test
+# ==========================================================
+
+if __name__ == "__main__":
+
+    print("=" * 60)
+    print("GRAD-CAM++ TEST")
+    print("=" * 60)
+
+    print("Grad-CAM++ class loaded successfully.")
+
+    print("Target layer will be:")
+
+    print("model.mel_encoder.features[16]")

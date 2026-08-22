@@ -1,4 +1,6 @@
+import gc
 import os
+import sys
 import torch
 import torch.nn.functional as F
 import pandas as pd
@@ -22,6 +24,18 @@ from utils.preprocessing import (
 from config import SAVE_DIR
 from config import MODEL_DIR
 from config import EXPERIMENT_NAME
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
+
+
+import cv2
+import librosa
+import matplotlib.pyplot as plt
+import numpy as np
+import torch.nn as nn
+from torchvision.models import efficientnet_b0
 
 
 class LungSoundPredictor:
@@ -64,21 +78,33 @@ class LungSoundPredictor:
     # Preprocessing
     #######################################################
 
-    def preprocess(self, wav_path):
 
-        signal, sr = load_audio(wav_path)
+def preprocess(self, wav_path):
 
-        signal = wavelet_denoise(signal)
+    print(">>> PREPROCESS ENTERED <<<", flush=True)
 
-        signal = normalize_length(signal, sr)
+    signal, sr = load_audio(wav_path)
 
-        mfcc = extract_mfcc(signal, sr)
+    print(">>> AUDIO LOADED <<<", flush=True)
 
-        mel = extract_mel(signal, sr)
+    signal = wavelet_denoise(signal)
 
-        chroma = extract_chroma(signal, sr)
+    signal = normalize_length(signal, sr)
 
-        return mfcc, mel, chroma
+    mfcc = extract_mfcc(signal, sr)
+
+    mel = extract_mel(signal, sr)
+
+    print(">>> MEL EXTRACTED <<<", flush=True)
+    print("Shape:", mel.shape, flush=True)
+    print("Min:", mel.min(), flush=True)
+    print("Max:", mel.max(), flush=True)
+    print("Mean:", mel.mean(), flush=True)
+    print("Std:", mel.std(), flush=True)
+
+    chroma = extract_chroma(signal, sr)
+
+    return mfcc, mel, chroma
 
     #######################################################
     # Tensor Conversion
@@ -126,6 +152,8 @@ class LungSoundPredictor:
     #######################################################
 
     def predict(self, wav_path):
+
+        print(">>> PREDICT FUNCTION RUNNING <<<")
 
         total_start = time.perf_counter()
 
