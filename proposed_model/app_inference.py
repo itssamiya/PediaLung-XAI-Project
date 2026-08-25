@@ -3,6 +3,11 @@ import os
 import sys
 import time
 
+# CPU Performance constraints to prevent memory leaks
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 # Force path resolution so imports work regardless of working directory
 FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.abspath(os.path.join(FILE_DIR, ".."))
@@ -20,6 +25,8 @@ import torch.nn.functional as F
 from sklearn.preprocessing import LabelEncoder
 from torchvision.models import efficientnet_b0
 
+torch.set_num_threads(1)
+
 from utils.preprocessing import (
     extract_chroma,
     extract_mel,
@@ -28,12 +35,6 @@ from utils.preprocessing import (
     normalize_length,
     wavelet_denoise,
 )
-
-# CPU Performance constraints
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-torch.set_num_threads(2)
 
 TARGET_HEIGHT = 128
 TARGET_WIDTH = 259
@@ -63,7 +64,7 @@ class EfficientNetGradCAM:
 
     def generate(self, inputs, target_class):
         self.model.zero_grad()
-        inputs = inputs.requires_grad_(True)
+        inputs = inputs.clone().detach().requires_grad_(True)
         outputs = self.model(inputs)
 
         target = outputs[:, target_class]
@@ -80,7 +81,12 @@ class EfficientNetGradCAM:
         cam_max = cam.max()
         cam = (cam - cam_min) / (cam_max - cam_min + 1e-8)
 
-        return cam.squeeze(0).squeeze(0).cpu().numpy()
+        cam_np = cam.squeeze().cpu().numpy()
+
+        # Clean gradient references
+        self.model.zero_grad()
+        del outputs, target, gradients, activations, weights, cam
+        return cam_np
 
 
 class EfficientNetB0Model(nn.Module):
@@ -199,9 +205,9 @@ class PediaLungAppPredictor:
 
         return torch.cat([mfcc_t, mel_t, chroma_t], dim=1)
 
-    def create_gradcam(self, inputs, predicted_class, save_path):
-        with torch.set_grad_enabled(True):
-            heatmap = self.gradcam.generate(inputs, predicted_class)
+    def create_gradcam(self, inputs, predicted_index, save_path):
+        # Generate Grad-CAM heatmap using class index integer
+        heatmap = self.gradcam.generate(inputs, predicted_index)
 
         mel_tensor = inputs[0, 1].cpu().detach().numpy()
         vmin, vmax = np.percentile(mel_tensor, 1), np.percentile(mel_tensor, 99)
@@ -231,7 +237,7 @@ class PediaLungAppPredictor:
             heatmap_norm, aspect="auto", origin="lower", cmap="jet", alpha=0.5
         )
         axes[1].set_title(
-            f"GradCAM Attention Overlay (Class: {predicted_class})",
+            f"GradCAM Attention Overlay (Class: {self.class_names[predicted_index]})",
             fontsize=11,
             fontweight="bold",
         )
@@ -241,7 +247,11 @@ class PediaLungAppPredictor:
         plt.tight_layout()
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
-        plt.close()
+        plt.close(fig)
+
+        # Force garbage collection to prevent CPU memory accumulation
+        del heatmap, heatmap_resized, mel_norm, mel_tensor
+        gc.collect()
 
         return save_path
 
@@ -278,6 +288,10 @@ class PediaLungAppPredictor:
 
         total_time = (time.perf_counter() - total_start) * 1000
 
+        # Cleanup tensor memory
+        del inputs, outputs, probabilities
+        gc.collect()
+
         return {
             "prediction": prediction,
             "confidence": float(confidence.item()),
@@ -289,23 +303,3 @@ class PediaLungAppPredictor:
             "gradcam_time": grad_time,
             "total_time": total_time,
         }
-
-
-if __name__ == "__main__":
-    predictor = PediaLungAppPredictor()
-
-    test_file = os.path.join(
-        ROOT_DIR, "data", "test2022_wav", "40512331_8.1_1_p1_3544.wav"
-    )
-
-    result = predictor.predict(test_file)
-
-    print("\n========================================")
-    print("PEDIALUNG-XAI INFERENCE BENCHMARK")
-    print("========================================")
-    print(f"Prediction       : {result['prediction']}")
-    print(f"Confidence       : {result['confidence'] * 100:.2f}%")
-    print(f"Preprocessing    : {result['preprocessing_time']:.2f} ms")
-    print(f"Inference        : {result['inference_time']:.2f} ms")
-    print(f"Grad-CAM         : {result['gradcam_time']:.2f} ms")
-    print(f"Total            : {result['total_time']:.2f} ms")
