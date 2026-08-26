@@ -23,9 +23,7 @@ FEATURE_DIR = Path("features/chroma")
 if not FEATURE_DIR.exists():
     FEATURE_DIR.mkdir(parents=True)
 
-# ==========================================================
-# CHANGE THIS ONLY IF YOUR DATASET IS IN A DIFFERENT LOCATION
-# ==========================================================
+
 
 DATASET_PATH = Path(r"D:\Research\SPRSound-main\SPRSound-main\BioCAS2022")
 
