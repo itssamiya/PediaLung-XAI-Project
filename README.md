@@ -19,7 +19,7 @@
 | Model Architecture | Accuracy | Weighted F1 | Parameter Count |
 | :--- | :---: | :---: | :---: |
 | **EfficientNet-B0 (Final Model)** | **85.44%** | **85.28%** | **4.02 M** |
-| Lightweight CNN  | 82.73% | 82.75% | Custom |
+| Lightweight CNN  | 82.73% | 82.75% | **4.02 M** |
 | ResNet-18 | 75.15% | 77.66% | 11.18 M |
 
 ---
